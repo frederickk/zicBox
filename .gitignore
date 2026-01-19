@@ -1,18 +1,34 @@
+# IDE / Editor
 .vscode
 .vscode/*.log
-.note.local
-demo.json
-zicHost
-list_pulse
-*.so
+
+# Build artifacts
+/build
 *.o
+*.so
+*.gch
+output
+
+# Executables
+zicHost
+zicUi
+/zicBox
+/zicPixel
+zicPixelSSD1306
+list_pulse
 test
+test2
 try_so
 methodptr
-zicUi
-zicBox
-zicPixel
-zicPixelSSD1306
+thread
+ttf2font
+matrix
+mcp23017_read
+test_pulse
+mainSDL
+trystuff/neotrellis
+
+# Platform-specific builds
 zicBox.arm
 zicBox.x86
 zicPixel.arm
@@ -23,32 +39,33 @@ pixelSSD1306.x86
 pixelSSD1306.arm
 pixel.arm
 pixel.x86
-/build
-test2
-*.log
-thread
-plugins/audio/tutorial/*.bin
+
+# Dependencies
+node_modules
+managed_components
+
+# Configuration & secrets
+.note.local
+demo.json
 pixel_env.lua
 pixel_env_.lua
-*.gch
-node_modules
-* copy.lua
+.wpa_supplicant.conf
+.github_token
+apikey.js
+
+# Logs & temporary files
+*.log
 tape/.tmp/*
 tape/tmp/*
 samples/tape_tmp/*.wav
-ttf2font
-matrix
+* copy.lua
+
+# Data & backups
 data.zip
-mcp23017_read
-test_pulse
-test_pulse.cpp
-trystuff/neotrellis
-.wpa_supplicant.conf
-output
-.github_token
 data_backup
-mainSDL
-managed_components
 rag/
-apikey.js
+
+# Generated files
+plugins/audio/tutorial/*.bin
 host/*.d
+test_pulse.cpp
