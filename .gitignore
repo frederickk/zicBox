@@ -1,3 +1,4 @@
+.vscode
 .vscode/*.log
 .note.local
 demo.json
@@ -22,7 +23,7 @@ pixelSSD1306.x86
 pixelSSD1306.arm
 pixel.arm
 pixel.x86
-build
+/build
 test2
 *.log
 thread
