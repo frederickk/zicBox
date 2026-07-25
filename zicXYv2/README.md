@@ -31,6 +31,25 @@ The **Zic XY** is a powerful, digital groovebox and synthesizer designed for mus
 ![screenshot_4](zicXY/screenshot_4.png)
 ![screenshot_5](zicXY/screenshot_5.png)
 
+## Running desktop build locally
+
+To compile and run zicXY on desktop (Linux with SFML & ALSA installed):
+
+```bash
+cd zicXYv2
+make
+```
+
+### macOS
+
+```bash
+brew install sfml@2 libsndfile
+cd zicXYv2
+make
+```
+
+Audio goes through [miniaudio](https://miniaud.io) (CoreAudio) instead of ALSA; no other setup is required.
+
 ## Build & Installation
 
 ### Zic XY - Bill of Materials (BOM)

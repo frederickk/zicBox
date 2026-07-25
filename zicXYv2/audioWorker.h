@@ -1,12 +1,20 @@
 // zicXYv2/audioWorker.h
 #pragma once
 
-#include <alsa/asoundlib.h>
 #include <atomic>
 #include <iostream>
 #include <mutex>
 #include <thread>
 #include <vector>
+
+#ifdef __APPLE__
+// No ALSA on macOS; miniaudio talks to CoreAudio instead. Implementation
+// lives in audioBackendMiniaudioImpl.cpp, its own translation unit — see
+// that file for why.
+#include "libs/miniaudio/miniaudio.h"
+#else
+#include <alsa/asoundlib.h>
+#endif
 
 #include "audio/TrackRenderPool.h"
 #include "helpers/clamp.h"
@@ -14,6 +22,197 @@
 
 void loadClip(Track& trk, int clipIdx);
 
+#ifdef __APPLE__
+// CoreAudio (via miniaudio) playback. miniaudio owns and drives its own
+// real-time render thread internally; there is no ALSA-style blocking
+// write loop to spawn a thread for on this platform. The per-block
+// sequencing/mixing logic below is a direct port of the ALSA audioWorker
+// further down in this file — keep both in sync if you change one.
+ma_device audioDevice;
+
+void audioDataCallback(ma_device*, void* output, const void*, ma_uint32 frameCount)
+{
+    // macOS only lets a thread name itself; this callback always runs on
+    // miniaudio's dedicated CoreAudio render thread, so name it once here.
+    thread_local bool named = false;
+    if (!named) {
+        pthread_setname_np("zicBox_Audio");
+        named = true;
+    }
+
+    // Persistent render state, lazily constructed once on first callback
+    // (thread pool construction is expensive, so it isn't recreated per call).
+    static std::vector<float> tapeBuf;
+    static std::vector<float> mixed;
+    static std::vector<Track*> trackPtrs;
+    static std::vector<TrackFrameEvent> events;
+
+    static const size_t hw = std::thread::hardware_concurrency() == 0 ? 2 : std::thread::hardware_concurrency();
+    static const size_t maxWorkersByHw = (hw > 2) ? (hw - 2) : 1;
+    static const size_t workers = std::min<size_t>(4, std::max<size_t>(1, maxWorkersByHw));
+
+    static auto renderTrackFn = [](Track& trk, const TrackFrameEvent* trackEvents, size_t numFrames, std::vector<float>& localMix) {
+        if (!trk.engine) return;
+
+        float firstSampleAbs = 0.f;
+        bool hasFirstSample = false;
+
+        for (size_t f = 0; f < numFrames; ++f) {
+            const TrackFrameEvent& ev = trackEvents[f];
+
+            if (ev.loadClip && ev.clipIdx >= 0) {
+                loadClip(trk, ev.clipIdx);
+                trk.pendingClipIdx = -1;
+            }
+
+            if (ev.noteOn) {
+                trk.engine->noteOn(ev.note, ev.velocity);
+                trk.noteSamplesRemaining = ev.noteLenSamples;
+                trk.playingNote = ev.note;
+            }
+
+            if (trk.noteSamplesRemaining > 0 && --trk.noteSamplesRemaining == 0) {
+                trk.engine->noteOff(trk.playingNote);
+            }
+
+            const float s = trk.engine->sample() * ((trk.isMuted || trk.chainMuted) ? 0.f : trk.volume);
+            if (!hasFirstSample) {
+                firstSampleAbs = std::abs(s);
+                hasFirstSample = true;
+            }
+            localMix[f] += s;
+        }
+
+        if (hasFirstSample) {
+            std::lock_guard<std::mutex> hl(trk.historyMtx);
+            trk.history.push_back(firstSampleAbs);
+            trk.history.pop_front();
+        }
+    };
+
+    static TrackRenderPool<Track> renderPool(workers, renderTrackFn);
+
+    const size_t num_frames = frameCount;
+    tapeBuf.assign(num_frames, 0.f);
+    mixed.assign(num_frames, 0.f);
+
+    int16_t* out = (int16_t*)output;
+    std::lock_guard<std::mutex> lock(studio.audioMutex);
+    std::fill(out, out + num_frames * 2, 0);
+
+    trackPtrs.clear();
+    trackPtrs.reserve(studio.tracks.size());
+    for (auto& trk : studio.tracks) {
+        trackPtrs.push_back(trk.get());
+    }
+
+    const size_t trackCount = trackPtrs.size();
+    events.assign(trackCount * num_frames, TrackFrameEvent {});
+
+    for (size_t f = 0; f < num_frames; ++f) {
+        if (!studio.isPlaying) continue;
+
+        studio.sampleCounter = studio.sampleCounter + 1.0;
+        if (studio.sampleCounter >= studio.samplesPerStep) {
+            studio.sampleCounter = 0;
+            studio.currentStep = (studio.currentStep + 1) % SEQ_STEPS;
+
+            const bool wrapped = (studio.currentStep == 0);
+            const int curStep = studio.currentStep;
+
+            for (size_t t = 0; t < trackCount; ++t) {
+                Track* trk = trackPtrs[t];
+                auto& ev = events[t * num_frames + f];
+
+                if (wrapped) {
+                    if (trk->chainPlaying && !trk->chain.empty()) {
+                        trk->chainActiveIdx++;
+                        if (trk->chainActiveIdx >= (int)trk->chain.size()) {
+                            if (trk->chainLoopMode == 1) { // Hold mode
+                                trk->chainActiveIdx = (int)trk->chain.size() - 1;
+                            } else { // Loop Chain mode
+                                trk->chainActiveIdx = 0;
+                            }
+                        }
+                        int nextItem = trk->chain[trk->chainActiveIdx];
+                        if (nextItem == -1) {
+                            trk->chainMuted = true;
+                        } else {
+                            trk->chainMuted = false;
+                            if (nextItem != trk->activeClipIdx) {
+                                ev.loadClip = true;
+                                ev.clipIdx = nextItem;
+                            }
+                        }
+                    } else if (trk->pendingClipIdx >= 0) {
+                        ev.loadClip = true;
+                        ev.clipIdx = trk->pendingClipIdx;
+                    }
+                }
+
+                if (trk->repeatActive && trk->noteRepeat > 0) {
+                    int interval = 1 << (trk->noteRepeat - 1);
+                    if (curStep % interval == 0) {
+                        ev.noteOn = true;
+                        ev.note = trk->repeatNote;
+                        ev.velocity = 1.0f;
+                        ev.noteLenSamples = (uint32_t)(0.5f * studio.samplesPerStep);
+                    }
+                } else {
+                    auto& step = trk->sequence[curStep];
+                    if (step.active && !trk->isMuted && rnd.pct() <= step.condition) {
+                        ev.noteOn = true;
+                        ev.note = step.note;
+                        ev.velocity = step.velocity;
+                        ev.noteLenSamples = (uint32_t)(step.len * studio.samplesPerStep);
+                    }
+                }
+            }
+        }
+    }
+
+    renderPool.render(trackPtrs, events, num_frames, mixed);
+
+    for (size_t f = 0; f < num_frames; ++f) {
+        float o = studio.masterScatter.process(mixed[f], studio.samplesPerStep);
+        o = studio.filter.process(o);
+        o = studio.compressor.process(o);
+        tapeBuf[f] = o;
+
+        int16_t v = (int16_t)(CLAMP(o, -1.f, 1.f) * 32767.f / (MAX_TRACKS / 2)) * studio.volume;
+        out[f * 2] += v;
+        out[f * 2 + 1] += v;
+    }
+
+    studio.tape.process(tapeBuf.data(), num_frames, SAMPLE_RATE);
+}
+
+bool audioInit()
+{
+    ma_device_config config = ma_device_config_init(ma_device_type_playback);
+    config.playback.format = ma_format_s16;
+    config.playback.channels = 2;
+    config.sampleRate = SAMPLE_RATE;
+    config.periodSizeInFrames = 256;
+    config.dataCallback = audioDataCallback;
+
+    if (ma_device_init(NULL, &config, &audioDevice) != MA_SUCCESS) {
+        std::cerr << "Failed to initialize CoreAudio device\n";
+        return false;
+    }
+    if (ma_device_start(&audioDevice) != MA_SUCCESS) {
+        std::cerr << "Failed to start CoreAudio device\n";
+        ma_device_uninit(&audioDevice);
+        return false;
+    }
+    return true;
+}
+
+void audioShutdown()
+{
+    ma_device_uninit(&audioDevice);
+}
+#else
 snd_pcm_t* audioInit()
 {
     snd_pcm_t* pcm_h;
@@ -185,3 +384,4 @@ void audioWorker(snd_pcm_t* pcm)
         }
     }
 }
+#endif

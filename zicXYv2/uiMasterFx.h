@@ -19,7 +19,7 @@ int paramsTopY = 0; // Track where the grid row starts for context matching
 
 uint8_t encodersSelection = 0;
 
-size_t paramCount = 16;
+constexpr size_t paramCount = 16;
 bool drawStatic(Draw& d, const int winW, const int winH, bool needFullRedraw, int currentY)
 {
     if (!needsRedraw && !needFullRedraw) return false;

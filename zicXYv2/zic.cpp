@@ -30,12 +30,23 @@ int main()
 {
     logInfo("Starting zicXYv2");
 
+#ifdef __APPLE__
+    if (!audioInit()) {
+        logWarn("Failed to initialize audio");
+    }
+    // 1-arg form: a thread can only name itself on macOS.
+    pthread_setname_np("zicBox_UI");
+    // CoreAudio (via miniaudio) drives its own real-time render thread and
+    // requests appropriate priority for it internally, so there's no
+    // separate thread to spawn or prioritize here.
+#else
     snd_pcm_t* pcm_h = audioInit();
     pthread_setname_np(pthread_self(), "zicBox_UI");
 
     std::thread aThread(audioWorker, pcm_h);
     pthread_setname_np(aThread.native_handle(), "zicBox_Audio");
     setThreadRealtime(aThread.native_handle(), 30, "audio thread");
+#endif
 
     Styles appStyles = {
         .screen = { SCREEN_W, SCREEN_H }, .margin = 2, .colors = { { 15, 15, 18 }, { 255, 255, 255 }, { 120, 120, 130 }, { 0, 180, 255 }, { 10, 10, 12 }, { 28, 28, 32 }, { 35, 35, 40 } }
@@ -55,7 +66,11 @@ int main()
 #endif
 
     keep_running = false;
+#ifdef __APPLE__
+    audioShutdown();
+#else
     aThread.join();
     snd_pcm_close(pcm_h);
+#endif
     return 0;
 }

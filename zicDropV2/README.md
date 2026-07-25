@@ -30,3 +30,13 @@ To compile and run zicDrop on desktop (Linux with SFML & ALSA installed):
 cd zicDropV2
 make
 ```
+
+### macOS
+
+```bash
+brew install sfml@2 libsndfile
+cd zicDropV2
+make
+```
+
+Audio goes through [miniaudio](https://miniaud.io) (CoreAudio) instead of ALSA; no other setup is required.

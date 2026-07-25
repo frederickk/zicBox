@@ -37,7 +37,10 @@ void param(Draw& d, Param& param, const int colW, const int winW, int x, int y, 
     if (param.string) {
         ss << param.string;
     } else {
-        ss << std::fixed << std::setprecision(param.precision) << param.value << param.unit;
+        ss << std::fixed << std::setprecision(param.precision) << param.value;
+        if (param.unit) {
+            ss << param.unit;
+        }
     }
 
     d.text({ x + 4, y + 16 }, ss.str(), 8, { .color = { 170, 170, 180 }, .font = &PoppinsLight_8, .maxWidth = colW - 8 });

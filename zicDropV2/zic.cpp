@@ -6,7 +6,15 @@
 #include <vector>
 #include <chrono>
 #include <mutex>
+
+#ifdef __APPLE__
+// No ALSA on macOS; miniaudio talks to CoreAudio instead. Implementation
+// lives in audioBackendMiniaudioImpl.cpp, its own translation unit — see
+// that file for why.
+#include "libs/miniaudio/miniaudio.h"
+#else
 #include <alsa/asoundlib.h>
+#endif
 
 #include "sequenceBrain.h"
 #include "audio/engines/drop2.h"
@@ -44,6 +52,73 @@ void setThreadRealtime(pthread_t thread, int priority, const char* name)
     }
 }
 
+#ifdef __APPLE__
+// CoreAudio (via miniaudio) playback. miniaudio owns and drives its own
+// real-time render thread internally; there is no ALSA-style blocking
+// write loop to spawn a thread for on this platform.
+ma_device audioDevice;
+
+void audioDataCallback(ma_device*, void* output, const void*, ma_uint32 frameCount)
+{
+    // macOS only lets a thread name itself; this callback always runs on
+    // miniaudio's dedicated CoreAudio render thread, so name it once here.
+    thread_local bool named = false;
+    if (!named) {
+        pthread_setname_np("zicDrop_Audio");
+        named = true;
+    }
+
+    int16_t* out = (int16_t*)output;
+    std::lock_guard<std::mutex> lock(audioMutex);
+
+    for (ma_uint32 f = 0; f < frameCount; ++f) {
+        // Process tick logic
+        bool ticked = brain.processSample();
+        if (ticked) {
+            audio.performanceMode = brain.performanceMode;
+            if (brain.triggerKick) {
+                audio.triggerKickVoice();
+            }
+            if (brain.triggerSynth) {
+                audio.triggerSynthVoice();
+            }
+        }
+        // Process synthesis
+        float sample = audio.process();
+        int16_t v = (int16_t)(sample * 32767.0f);
+
+        // Stereo out
+        out[f * 2] = v;
+        out[f * 2 + 1] = v;
+    }
+}
+
+bool audioInit()
+{
+    ma_device_config config = ma_device_config_init(ma_device_type_playback);
+    config.playback.format = ma_format_s16;
+    config.playback.channels = 2;
+    config.sampleRate = SAMPLE_RATE;
+    config.periodSizeInFrames = NUM_FRAMES;
+    config.dataCallback = audioDataCallback;
+
+    if (ma_device_init(NULL, &config, &audioDevice) != MA_SUCCESS) {
+        std::cerr << "Failed to initialize CoreAudio device\n";
+        return false;
+    }
+    if (ma_device_start(&audioDevice) != MA_SUCCESS) {
+        std::cerr << "Failed to start CoreAudio device\n";
+        ma_device_uninit(&audioDevice);
+        return false;
+    }
+    return true;
+}
+
+void audioShutdown()
+{
+    ma_device_uninit(&audioDevice);
+}
+#else
 // ALSA Playback Initialization
 snd_pcm_t* audioInit()
 {
@@ -100,11 +175,23 @@ void audioWorker(snd_pcm_t* pcm)
         }
     }
 }
+#endif
 
 int main()
 {
     std::cout << "Starting zicDrop Standalone Synth with divided runtime environment...\n";
 
+#ifdef __APPLE__
+    if (!audioInit()) {
+        std::cerr << "Failed to initialize audio. Exiting.\n";
+        return 1;
+    }
+    // 1-arg form: a thread can only name itself on macOS.
+    pthread_setname_np("zicDrop_UI");
+    // CoreAudio (via miniaudio) drives its own real-time render thread and
+    // requests appropriate priority for it internally, so there's no
+    // separate thread to spawn or prioritize here.
+#else
     snd_pcm_t* pcm_h = audioInit();
     if (!pcm_h) {
         std::cerr << "Failed to initialize ALSA audio. Exiting.\n";
@@ -117,6 +204,7 @@ int main()
     std::thread audioThread(audioWorker, pcm_h);
     pthread_setname_np(audioThread.native_handle(), "zicDrop_Audio");
     setThreadRealtime(audioThread.native_handle(), 35, "audio thread");
+#endif
 
     // Build the UI
     UiDrop ui(brain, audio);
@@ -137,8 +225,12 @@ int main()
 #endif
 
     keep_running = false;
+#ifdef __APPLE__
+    audioShutdown();
+#else
     audioThread.join();
     snd_pcm_close(pcm_h);
+#endif
 
     std::cout << "zicDrop stopped cleanly.\n";
     return 0;
